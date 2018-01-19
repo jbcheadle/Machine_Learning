@@ -1,5 +1,5 @@
 ---
-title: "Regression Models Course Project"
+title: "Practical Machine Learning Course Project"
 author: "John B Cheadle"
 date: "January 17, 2018"
 output:
@@ -8,113 +8,164 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+require(caret)
 require(ggplot2)
-require(car)
+require(RANN)
+require(rattle)
+require(e1071)
+require(randomForest)
 ```
 
 # Executive Summary
 
-This report explores the relationship between between a set of variables and miles per gallon (MPG) using the mtcars data set. Specifically, the repot seeks to answer two questions:
+The goal of this report is to use accelerometer data from participants engaged in a dumbbell exercise, predicting the manner in which they did the exercise (classe) from variables in the dataset using a machine learning algorithm.  Data was first preprocessed to remove columns in which most values were NAs, impertinent data columns, and columns that had near-zero variation.  The data was split up into training and validation sets; the 'test' set is actually a set of 20 observations used for a quiz in the Practical Machine Learning course at Coursera.  Two models were generated using the rpart and rf machine learning algorithms (caret package).  These models were chosen primarily due to number of predictors and size of dataset; they are suited to very large datasets with a large number of variables, where the outcome is a factor and the features are automatically selected.  Cross-validation was performed within each train() function - k-folds cross-validation (k=5) was chosen due to its lighter computational burden compared with other methods such as repeated k-folds cross validation.  the rpart model was a poor predictor of exercise class, with accuracy = 0.5051, whereas the rf model was an excellent predictor of exercise class, with accuracy = 1.  Therefore, our expected out-of-sample error rate is 0.
 
-1. Is an automatic or manual transmission better for MPG?
+# Introduction
 
-2. What is the quantifiable difference between automatic and manual transmissions?
+In this course project for the Machine Learning class at Coursera, we are working with accelerometer data used for human activity recognition (HAR).  Specifically, study data from accelerometers on the belt, forearm, arm, and dumbbell of 6 participants is used.  The participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways:
 
-The initial linear model fitted with MPG as the otucome and automatic/manual as the predictor, **lm(mpg ~ factor(am), data=mtcars)**, shows an increase of 7.425 mpg switching from automatic to manual transmission.  However, there is a hidden variable, weight(wt), which is highly correlated with the am variable.  When we add wt to our linear model, **lm(mpg ~ factor(am) + wt, data=mtcars)**, we show a *decrease* of .024 mpg switching from automatic to manaul transmission, an example of Simpson's paradox. Therefore, we conclude that when weight is included as a regressor in our model, automatic/manual transmission is not a significant predictor for mpg in our mtcars data set.
+* exactly according to the specification (Class A)
+* throwing the elbows to the front (Class B)
+* lifting the dumbbell only halfway (Class C)
+* lowering the dumbbell only halfway (Class D)
+* throwing the hips to the front (Class E)
 
-# Exploring the mtcars data set
-To start, we look at some aspects of the mtcars data set.
+The goal of this project is to predict the manner in which the excercise was performed based on the other variables in the dataset.  More information on the dataset can be found [here](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har).  
 
-```{r mtcars_help, echo=FALSE}
-?mtcars
-data(mtcars)
-head(mtcars)
-sapply(mtcars, class)
-```
-Here we get a sense of the mtcars data set.  We learn that 'am' is one of the main variables we want to regress on (0 = automatic, 1 = manual).
+# Components of the Model
 
-```{r mtcars_plot, echo=FALSE}
-boxplot(mpg~am,data=mtcars, 
-        main="Car Milage Data",
-        xlab="Transmission (0=auto, 1=manual)",
-        ylab="Miles Per Gallon (MPG)")
-```
+## Question
+We are trying to determine, as accurately as possible, **which type of exercise (above) was performed** by using other variables as predictors in our machine learning algorithm.
 
-It appears from the relative means of MPG for automatic and manaul transmission that these two variables are correlated.  In the following sections, we fit a linear model using lm() with the outcome 'mpg' and the primary regressor 'am' from the mtcars data set.
+## Input Data
+The data for this project are available at the following:
 
-# Model Fitting
-The initial model fitted used the variable am as the regressor to the mpg outcome.
+```{r input_data, echo=FALSE}
+## Training Data
+training <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"))
 
-```{r modelfit1, echo=TRUE}
-fit1 <- lm(mpg ~ factor(am), data=mtcars)
-summary(fit1)$coef
-```
-Here the intercept is the mean mpg for am value of 0 (automatic), whereas factor(am)1 is the increase in mpg switching to manual, which is 7.245 (a significant increase).  **So we are gaining 7.245 mpg from switching from automatic to manual, all other variables held constant.**
+## Testing Data
+testing <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"))
 
-# Residual Plot & Diagnostics
-To probe that the variation we see in our fit is not systemic, we investigate residuals.  Typically, to probe problems in the model, we plot residuals vs. fitted values.
-
-Clearly, there is something systemic **(Figure A1, Appendix)** that is causing variation, hinting at a hidden variable.
-
-We know intuitively that other factors influence a car's mpg, such as weight, # of cylinders, etc.  We explore the effect of weight on mpg in an exploratory plot, denoting whether the car is automatic or manual:
-
-```{r mtcars_ggplot, echo=TRUE}
-g = ggplot(data=mtcars, aes(wt,mpg))
-g = g + geom_point(size=4, alpha=1/2,
-                   aes(color=factor(am)))
-g = g + ggtitle('Investigating mtcars Variables')
-print(g)
 ```
 
-Here things become more clear; it appears that the heavier cars are almost all automatic (0, pink), whereas the lighter cars are almost all manual transmission (1, blue).
+The data for this project come from [this source](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har), as stated above.
 
-# Model Fitting, cont.
-In light of this new information, we fit more models and assess their fit using analysis of variance (ANOVA).
+## Features
+Feature selection is perhaps the most important part (next to the question) of a sucessful prediction. Good features make your model more accurate and interpretable.  In this section I go over rationale for pre-processing which reduces total number of possible predictors, whereas feature selection is done automatically by many of the caret models (rpart, rf, gbm, etc).
 
-```{r modelfit2, echo=TRUE}
-fit2 <- lm(mpg ~ factor(am) + wt, data=mtcars)
-fit3 <- lm(mpg ~ factor(am) + wt + cyl, data=mtcars)
-fit4 <- lm(mpg ~ ., data=mtcars)
+### Preprocessing
+There are a variety of pre-processing steps to take to whittle down potential features prior to model fitting.  First, I take a human look at the structure of the dataset and figure out which variables might be impertinent; e.g., which variables aren't really measures?  The first 7 were removed in this way: 'X' (index variable), 'user_name' (name of participant), 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp' (time information), 'new_window', 'num_window' (sequentiall-valued variables which I assume have to do with when a new exercise starts - no codebook available for this database, unfortunately). Secondly, columns which contain majority NA values are removed using a custom function. Finally, any variables with near-zero variance are removed using the nearZeroVariance() function.  
 
-anova(fit1, fit2, fit3, fit4)
+```{r preprocessing}
+
+## Taking a look at the data
+str(training)
+
+# Determining amount of NAs
+na_count <-sapply(training, function(y) sum(length(which(is.na(y)))))
+head(na_count,20)
+
+# Many columns have 19216 NA values (truncated), which is the majority of observations.
+# These columns were removed from the training data set.
+nas <- sapply(na_count, function(y) y==19216)
+training <- training[,nas==FALSE]
+sum(is.na(training))
+
+# Seems like the first 7 variables are impertinent
+training <- training[,-c(1:7)]
+
+## Near-zero Variance
+nzv <- nearZeroVar(training, saveMetrics = TRUE)
+sum(nzv$nzv)
+
+# 33 of our remaining variables have near-zero variance, and are removed
+training <- training[,nzv$nzv == FALSE]
 ```
-From the p-values it appears that other variables are necessary to include (fit2), but only up to a point; if we include all of them, our p-value drops.  Here we decide to go with fit2, the model that includes the variable wt.
+After preprocessing, we are left with 53 variables; 52 predictors and 1 outcome (classe).
 
-To investigate coefficients of this new model, we re-run the summary:
+Our test data set is very small (20 observations), and in order to test multiple models we can split our training set into a *training* and *validation* set prior to applying it to a test set.
 
-```{r modelfit_wt, echo=TRUE}
-summary(fit2)$coef
-```
-We notice that our factor(am)1 reversed sign and is not a significant predictor of mpg when weight is included as a regressor - This is an example of Simpson's paradox.  We reinterpret our coefficients as such: when we include am and wt as regressors, a switch from automatic to manual transmission *decreases* mpg by 0.24, whereas a 1000 lb increase in car weight decreases our mpg by 5.35.
+```{r splitting}
+inBuild <- createDataPartition(y = training$classe,
+                               p=0.7, list=FALSE)
+training <- training[inBuild,]
+validation <- training[-inBuild,]
 
-
-## Conclusions
-Based on p-values from our ANOVA, we chose the **Model 2: mpg ~ factor(am) + wt** as the most appropriate fit.  In this model, we see a 0.24 *decrease* in mpg switching from automatic to manual.  We also see a 5.35 *decrease* in mpg per 1000lb of car weight.
-
-To probe this model, we again plot the residuals vs the fitted (yhat) values.  As seen in Appendix figure A2, the scatterplot simply looks like a cloud of data points, suggesting an unbiased variation.
-
-We also quantify the uncertainty of our chosen model.
-
-```{r uncertainty, echo=TRUE}
-sumCoef <- summary(fit2)$coefficients
-sumCoef[2,1] + c(-1,1)*qt(.975,df=fit2$df) * sumCoef[2,2]
-sumCoef[3,1] + c(-1,1)*qt(.975,df=fit2$df) * sumCoef[3,2]
 ```
 
-The results: for our 1st coefficient 'am', a switch from automatic to manual results in a [-3.18 to 3.14] increase in mpg with 95% certainty.  This passes through 0 and is quite even on both sides, therefore insignificant.  For our 2nd coefficient 'wt', an increase in 1000lb of car weight is going to result in a [-6.96 to -3.74] increase in mpg, with 95% certainty.  This suggests am is insignificant, where increase in weight significantly reduces mpg.
+## Algorithms
+There are too many variables to reasonably choose features using exploratory plots; therefore, I will use decision tree (rpart) and random forest (rf), both of which are suited to very large datasets with a large number of variables, where the outcome is a factor and the features are automatically selected.
 
-In conclusion, our model suggests that manual/automatic transmission has *no effect* on mpg; rather, **weight is the primary predictor of mpg outcome.**
+Because random forest with repeated k-fold cross-validation was too computationally intensive for my computer, I instead use k-fold cross-validation with k=5.  Prior to the training, the seed is set for reproducibility.
 
-## Appendix
-```{r Figure_A1, echo=TRUE}
-yhat <- predict(fit1)
-e <- resid(fit1)
-plot(yhat, e, main = "Figure A1, Residuals vs. Fitted")
+```{r rpart}
+set.seed(86)
+train_control <- trainControl(method="cv", number=5)
+mod_rpart <- train(classe ~ ., method="rpart",
+                   trControl = train_control,
+                   data=training)
+
+fancyRpartPlot(mod_rpart$finalModel)
+```
+Our initial decision tree does an acceptable job splitting out group E,  but has trouble with the other groups (and does not even include D). 
+
+To obtain the accuracy of the model, I predict with the validation data set, then calculate the confusion matrix.
+
+```{r rpart_conf}
+pred_rpart <- predict(mod_rpart,validation)
+confm_rpart <- confusionMatrix(validation$classe, pred_rpart)
+confm_rpart
+
+```
+The confusion matrix supports the initial plot.  The rpart model performs poorly, achieving an accuracy of 0.5051.
+
+Next we move to the random forest model
+```{r rf}
+mod_rf <- train(classe ~ ., method="rf",
+                   trControl = train_control,
+                   data = training,
+                   prox = TRUE)
+
+plot(mod_rf)
+```
+A simple plot shows an accuracy peak at ~28 predictors.
+
+```{r rf_conf}
+pred_rf <- predict(mod_rf,validation)
+confm_rf <- confusionMatrix(validation$classe, pred_rf)
+confm_rf
+```
+The accuracy is shown to be 1, giving us an out-of-sample error rate of 0.
+
+## Evaluation on Test Set
+Training and testing data sets must be processed in the same way. Therefore, all processing we performed on the training set is performed on the test set:
+
+```{r test_preprocess}
+na_count <-sapply(testing, function(y) sum(length(which(is.na(y)))))
+
+nas <- sapply(na_count, function(y) y==20) # Change the number of NAs to reflect testing set size
+testing <- testing[,nas==FALSE]
+sum(is.na(training))
+
+# Seems like the first 7 variables are impertinent
+testing <- testing[,-c(1:7)]
+
+## Near-zero Variance
+nzvtest <- nearZeroVar(testing, saveMetrics = TRUE)
+sum(nzvtest$nzv)
+
+# No near-zero variables so we don't include.
 ```
 
-```{r Figure_A2, echo=TRUE}
-yhat2 <- predict(fit2)
-e2 <- resid(fit2)
-plot(yhat2, e2, main = "Figure A2, Residuals vs. Fitted")
+The test set has the variable 'problem_id' instead of 'classe' so we can't get a confusion matrix and therefore assess accuracy.  This test set is specifically for the quiz for the Practical Machine Learning class at Coursera.
+```{r evaluate}
+pred_rf_test <- predict(mod_rf,testing)
+solutions <- as.data.frame(cbind(testing$problem_id,
+                                 as.character(pred_rf_test)))
+colnames(solutions) <- c("Problem ID","Answer")
+solutions
+
 ```
+
 
